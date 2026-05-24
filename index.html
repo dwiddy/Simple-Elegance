@@ -813,8 +813,11 @@ setTimeout(()=>{applyingRemoteRef.current=false;},50);}};// ============== HYDRA
 // On mount: try to load from remote. If remote has data, apply it. If not,
 // seed remote with whatever's in localStorage (so the other device sees it).
 // Then subscribe to remote updates.
-useEffect(()=>{let unsubscribe=null;let cancelled=false;const init=async()=>{if(!_fb.ready){setSyncStatus('offline');return;}setSyncStatus('syncing');const remote=await fetchRemoteState();if(cancelled)return;if(remote&&remote['mp.selectedMeals']!==undefined){// Remote has data — it's the source of truth
-applyRemoteData(remote);}else{// Remote is empty — seed it with our local state
+useEffect(()=>{let unsubscribe=null;let cancelled=false;const init=async()=>{if(!_fb.ready){setSyncStatus('offline');return;}setSyncStatus('syncing');const remote=await fetchRemoteState();if(cancelled)return;// Hydration logic: does the remote document contain ANY of our synced data?
+// (Previously checked only mp.selectedMeals, which meant a fresh device would
+// see "blank" if the other device had recipes/edits but had never set a meal plan.)
+const remoteHasData=remote&&SYNCED_KEYS.some(k=>remote[k]!==undefined);if(remoteHasData){// Remote has data — it's the source of truth
+applyRemoteData(remote);}else{// Remote is truly empty — seed it with our local state
 const seed={};for(const k of SYNCED_KEYS){const v=storage.get(k,null);if(v!==null)seed[k]=v;}if(Object.keys(seed).length>0){await pushToRemote(seed);}}setSyncStatus('synced');// Subscribe to live updates
 unsubscribe=subscribeRemote(data=>{applyRemoteData(data);});};init();return()=>{cancelled=true;if(unsubscribe)unsubscribe();};// eslint-disable-next-line react-hooks/exhaustive-deps
 },[]);// Persist state — but skip when the update came from a remote snapshot
