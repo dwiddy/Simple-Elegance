@@ -751,9 +751,13 @@ try{if(firebase.storage){_fb.storage=firebase.storage();_fb.storageReady=true;}}
 // Read latest from Firestore. Returns object or null.
 const fetchRemoteState=async()=>{if(!_fb.ready)return null;try{const snap=await _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).get();return snap.exists?snap.data():null;}catch(e){console.warn('Remote fetch failed:',e);return null;}};// Write current local state to Firestore (merged)
 const pushToRemote=async updates=>{if(!_fb.ready)return;try{_fb.lastWriteAt=Date.now();await _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).set(_objectSpread(_objectSpread({},updates),{},{_updatedAt:Date.now()}),{merge:true});}catch(e){console.warn('Remote write failed:',e);}};// Subscribe to remote updates. Calls handler(data) when remote changes.
-const subscribeRemote=handler=>{if(!_fb.ready)return null;try{return _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).onSnapshot(snap=>{if(!snap.exists)return;// Ignore snapshots that came from our own writes within the last 1.5s
-// (Firestore echoes our writes back via onSnapshot)
-if(Date.now()-_fb.lastWriteAt<1500)return;const data=snap.data();if(data)handler(data);},err=>console.warn('Snapshot error:',err));}catch(e){console.warn('Subscribe failed:',e);return null;}};// Resize an image file in the browser to max width, JPEG quality 0.85
+const subscribeRemote=handler=>{if(!_fb.ready)return null;try{return _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).onSnapshot(snap=>{if(!snap.exists)return;// Use Firestore's snapshot metadata to skip echoes of our own writes.
+// hasPendingWrites === true means this snapshot reflects a local write
+// that hasn't been confirmed by the server yet. Skipping these prevents
+// ping-pong without using fragile timestamp guards. Snapshots from
+// OTHER devices have hasPendingWrites === false, so they come through
+// immediately for real-time cross-device sync.
+if(snap.metadata.hasPendingWrites)return;const data=snap.data();if(data)handler(data);},err=>console.warn('Snapshot error:',err));}catch(e){console.warn('Subscribe failed:',e);return null;}};// Resize an image file in the browser to max width, JPEG quality 0.85
 // Returns a Promise<Blob>
 const resizeImage=function(file){let maxWidth=arguments.length>1&&arguments[1]!==undefined?arguments[1]:1200;return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=ev=>{const img=new Image();img.onload=()=>{const scale=Math.min(1,maxWidth/img.width);const canvas=document.createElement('canvas');canvas.width=Math.round(img.width*scale);canvas.height=Math.round(img.height*scale);const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0,canvas.width,canvas.height);canvas.toBlob(blob=>{if(blob)resolve(blob);else reject(new Error('Canvas toBlob returned null'));},'image/jpeg',0.85);};img.onerror=()=>reject(new Error('Image load failed'));img.src=ev.target.result;};reader.onerror=()=>reject(new Error('FileReader failed'));reader.readAsDataURL(file);});};// Upload a File or Blob to Firebase Storage. Returns the public download URL.
 // onProgress receives a 0-100 number.
@@ -785,8 +789,15 @@ const App=()=>{// Load base recipes merged with edits
 const buildRecipes=()=>{const userRecipes=storage.get('mp.userRecipes',[]);const edits=storage.get('mp.recipeEdits',{});const merged=BASE_RECIPES.map(r=>{const editKey=r.id||r.Recipe;const edit=edits[editKey]||{};// Only apply non-empty edits
 const meaningfulEdit={};for(const _ref27 of Object.entries(edit)){var _ref28=_slicedToArray(_ref27,2);const k=_ref28[0];const v=_ref28[1];if(v!==''&&v!==null&&v!==undefined){meaningfulEdit[k]=v;}}return _objectSpread(_objectSpread({},r),meaningfulEdit);}).concat(userRecipes);return merged;};const _useState13=useState(buildRecipes),_useState14=_slicedToArray(_useState13,2),recipes=_useState14[0],setRecipes=_useState14[1];const _useState15=useState(()=>storage.get('mp.recipeTypes',DEFAULT_TYPES)),_useState16=_slicedToArray(_useState15,2),recipeTypes=_useState16[0],setRecipeTypes=_useState16[1];// Display order: shuffled once per session so the splash page feels fresh on each open,
 // but stable while the user navigates filters (no jitter on filter toggle).
-const shuffledRecipes=useMemo(()=>{const arr=[...recipes];for(let i=arr.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));var _ref29=[arr[j],arr[i]];arr[i]=_ref29[0];arr[j]=_ref29[1];}return arr;// eslint-disable-next-line react-hooks/exhaustive-deps
-},[recipes.length,recipes.map(r=>r.id||r.Recipe).join('|')]);const _useState17=useState(()=>{// Sanitize: drop entries that aren't valid meal assignments
+//
+// BUG FIX: We shuffle the *id list* and then look up current recipe data each render.
+// This way the order stays stable, but recipe field updates (favorite, wantToTry,
+// image_url, etc.) always show the latest values instead of a stale snapshot from
+// when shuffle first ran.
+const shuffledIds=useMemo(()=>{const ids=recipes.map(r=>r.id||r.Recipe);for(let i=ids.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));var _ref29=[ids[j],ids[i]];ids[i]=_ref29[0];ids[j]=_ref29[1];}return ids;// Re-shuffle only when the underlying recipe set changes (added/removed),
+// not when field values change.
+// eslint-disable-next-line react-hooks/exhaustive-deps
+},[recipes.length,recipes.map(r=>r.id||r.Recipe).join('|')]);const shuffledRecipes=useMemo(()=>{const byId=new Map();for(const r of recipes)byId.set(r.id||r.Recipe,r);return shuffledIds.map(id=>byId.get(id)).filter(Boolean);},[recipes,shuffledIds]);const _useState17=useState(()=>{// Sanitize: drop entries that aren't valid meal assignments
 // Valid forms: { id, Recipe, ... } (a recipe), { kind: 'leftovers'|'dining_out' },
 //              or { kind: 'custom', text: '...' } (free-form note)
 const raw=storage.get('mp.selectedMeals',{});const clean={};for(const _ref30 of Object.entries(raw)){var _ref31=_slicedToArray(_ref30,2);const day=_ref31[0];const m=_ref31[1];if(m&&typeof m==='object'&&(m.kind==='leftovers'||m.kind==='dining_out'||m.kind==='custom'&&m.text&&m.text.trim()||m.id||m.Recipe&&m.Recipe.trim())){clean[day]=m;}}return clean;}),_useState18=_slicedToArray(_useState17,2),selectedMeals=_useState18[0],setSelectedMeals=_useState18[1];const _useState19=useState(()=>storage.get('mp.dayConstraints',{})),_useState20=_slicedToArray(_useState19,2),dayConstraints=_useState20[0],setDayConstraints=_useState20[1];const _useState21=useState(()=>storage.get('mp.shortlist',[])),_useState22=_slicedToArray(_useState21,2),shortlist=_useState22[0],setShortlist=_useState22[1];// Sanitize shortlist on mount: drop any IDs/names that no longer match a real recipe
