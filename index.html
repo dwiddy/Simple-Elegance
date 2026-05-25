@@ -749,8 +749,19 @@ const SYNCED_KEYS=['mp.userRecipes','mp.recipeEdits','mp.selectedMeals','mp.dayC
 let _fb={app:null,db:null,storage:null,ready:false,storageReady:false,unsub:null,lastWriteAt:0};const initFirebase=()=>{if(typeof firebase==='undefined'){console.warn('Firebase SDK not loaded — running in local-only mode');return false;}try{_fb.app=firebase.initializeApp(FIREBASE_CONFIG);_fb.db=firebase.firestore();_fb.ready=true;// Storage is optional — only available if user enabled it in Firebase Console
 try{if(firebase.storage){_fb.storage=firebase.storage();_fb.storageReady=true;}}catch(e){console.warn('Firebase Storage not available — URL field still works:',e.message);}return true;}catch(e){console.error('Firebase init failed:',e);return false;}};const DOC_PATH=['mealPlanner','state'];// single shared document
 // Read latest from Firestore. Returns object or null.
-const fetchRemoteState=async()=>{if(!_fb.ready)return null;try{const snap=await _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).get();return snap.exists?snap.data():null;}catch(e){console.warn('Remote fetch failed:',e);return null;}};// Write current local state to Firestore (merged)
-const pushToRemote=async updates=>{if(!_fb.ready)return;try{_fb.lastWriteAt=Date.now();await _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).set(_objectSpread(_objectSpread({},updates),{},{_updatedAt:Date.now()}),{merge:true});}catch(e){console.warn('Remote write failed:',e);}};// Subscribe to remote updates. Calls handler(data) when remote changes.
+const fetchRemoteState=async()=>{if(!_fb.ready)return null;try{const snap=await _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).get();return snap.exists?snap.data():null;}catch(e){console.warn('Remote fetch failed:',e);return null;}};// Write current local state to Firestore.
+// CRITICAL: Firestore's set({merge: true}) does *deep* map-merging on nested
+// object fields. That means if you write { 'mp.selectedMeals': { Monday: x } }
+// to a doc that already has { 'mp.selectedMeals': { Monday: x, Tuesday: y } },
+// the Tuesday key is preserved instead of removed. Deletions silently fail.
+//
+// To make our object fields behave like atomic values (replace, not merge),
+// we use update() instead of set(merge:true). update() replaces the entire
+// value of each specified field. If the doc doesn't exist, we fall back to
+// set() for the initial seed.
+const pushToRemote=async updates=>{if(!_fb.ready)return;try{_fb.lastWriteAt=Date.now();const docRef=_fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]);const payload=_objectSpread(_objectSpread({},updates),{},{_updatedAt:Date.now()});try{// update() requires the doc to exist; replaces fields atomically
+await docRef.update(payload);}catch(err){// First write (doc doesn't exist yet) — use set without merge
+if(err&&(err.code==='not-found'||/not.found/i.test(err.message||''))){await docRef.set(payload);}else{throw err;}}}catch(e){console.warn('Remote write failed:',e);}};// Subscribe to remote updates. Calls handler(data) when remote changes.
 const subscribeRemote=handler=>{if(!_fb.ready)return null;try{return _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).onSnapshot(snap=>{if(!snap.exists)return;// Use Firestore's snapshot metadata to skip echoes of our own writes.
 // hasPendingWrites === true means this snapshot reflects a local write
 // that hasn't been confirmed by the server yet. Skipping these prevents
