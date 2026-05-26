@@ -750,18 +750,28 @@ let _fb={app:null,db:null,storage:null,ready:false,storageReady:false,unsub:null
 try{if(firebase.storage){_fb.storage=firebase.storage();_fb.storageReady=true;}}catch(e){console.warn('Firebase Storage not available — URL field still works:',e.message);}return true;}catch(e){console.error('Firebase init failed:',e);return false;}};const DOC_PATH=['mealPlanner','state'];// single shared document
 // Read latest from Firestore. Returns object or null.
 const fetchRemoteState=async()=>{if(!_fb.ready)return null;try{const snap=await _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).get();return snap.exists?snap.data():null;}catch(e){console.warn('Remote fetch failed:',e);return null;}};// Write current local state to Firestore.
-// CRITICAL: Firestore's set({merge: true}) does *deep* map-merging on nested
-// object fields. That means if you write { 'mp.selectedMeals': { Monday: x } }
-// to a doc that already has { 'mp.selectedMeals': { Monday: x, Tuesday: y } },
-// the Tuesday key is preserved instead of removed. Deletions silently fail.
 //
-// To make our object fields behave like atomic values (replace, not merge),
-// we use update() instead of set(merge:true). update() replaces the entire
-// value of each specified field. If the doc doesn't exist, we fall back to
-// set() for the initial seed.
-const pushToRemote=async updates=>{if(!_fb.ready)return;try{_fb.lastWriteAt=Date.now();const docRef=_fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]);const payload=_objectSpread(_objectSpread({},updates),{},{_updatedAt:Date.now()});try{// update() requires the doc to exist; replaces fields atomically
-await docRef.update(payload);}catch(err){// First write (doc doesn't exist yet) — use set without merge
-if(err&&(err.code==='not-found'||/not.found/i.test(err.message||''))){await docRef.set(payload);}else{throw err;}}}catch(e){console.warn('Remote write failed:',e);}};// Subscribe to remote updates. Calls handler(data) when remote changes.
+// Implementation notes:
+// - Our top-level field names contain dots (e.g. "mp.selectedMeals"). Firestore's
+//   update() interprets dots as path separators, so update() does NOT work with
+//   these field names. We must use set({merge: true}).
+// - set({merge: true}) preserves OTHER top-level fields in the doc (good — we
+//   don't want to wipe mp.shortlist when writing mp.selectedMeals).
+// - However, set({merge: true}) also does a DEEP merge for nested map values
+//   within a field. This means if mp.selectedMeals = {Sun: x, Tue: y} remotely
+//   and we write mp.selectedMeals = {Tue: y}, the Sunday key is preserved.
+//   Deletions silently fail.
+// - To work around this, before writing a field whose value is an object, we
+//   first read the current remote value and explicitly null-out keys that have
+//   been removed. This is implemented inside pushToRemote for the affected
+//   fields: mp.selectedMeals, mp.dayConstraints, mp.recipeEdits.
+const NESTED_MAP_FIELDS=['mp.selectedMeals','mp.dayConstraints','mp.recipeEdits'];const pushToRemote=async updates=>{if(!_fb.ready)return;try{_fb.lastWriteAt=Date.now();const docRef=_fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]);// For nested-map fields, fetch current remote value and add explicit
+// `null` entries for keys that the local version has removed. Firestore
+// treats null as "delete this key from the map" during merge.
+const payload=_objectSpread({},updates);const needsDeletionCheck=Object.keys(updates).filter(k=>NESTED_MAP_FIELDS.includes(k));if(needsDeletionCheck.length>0){try{const snap=await docRef.get();const remote=snap.exists?snap.data():{};for(const key of needsDeletionCheck){const remoteValue=remote[key]||{};const localValue=updates[key]||{};// For every key in remote that's NOT in local, mark it for deletion
+const withDeletions=_objectSpread({},localValue);for(const subKey of Object.keys(remoteValue)){if(!(subKey in localValue)){withDeletions[subKey]=firebase.firestore.FieldValue.delete();}}payload[key]=withDeletions;}}catch(readErr){console.warn('Could not read for deletion check:',readErr);// Fall through with original payload — won't propagate deletions but
+// additions/edits will still work.
+}}payload._updatedAt=Date.now();await docRef.set(payload,{merge:true});}catch(e){console.warn('Remote write failed:',e);}};// Subscribe to remote updates. Calls handler(data) when remote changes.
 const subscribeRemote=handler=>{if(!_fb.ready)return null;try{return _fb.db.collection(DOC_PATH[0]).doc(DOC_PATH[1]).onSnapshot(snap=>{if(!snap.exists)return;// Use Firestore's snapshot metadata to skip echoes of our own writes.
 // hasPendingWrites === true means this snapshot reflects a local write
 // that hasn't been confirmed by the server yet. Skipping these prevents
